@@ -17,4 +17,4 @@ PyMuPDF
 python-docx
 Pillow
 email-validator==2.1.0
-"pydantic[email]"==2.5.0
+# "pydantic[email]"==2.5.0
