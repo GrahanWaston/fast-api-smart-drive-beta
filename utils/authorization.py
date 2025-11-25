@@ -102,26 +102,36 @@ def can_access_directory(user: User, directory: Directory) -> bool:
     return False
 
 def get_accessible_departments(user: User, db: Session) -> List[int]:
-    """Dapatkan list department IDs yang dapat diakses user - ENHANCED VERSION"""
+    """Return list of accessible department IDs - OPTIMIZED VERSION"""
     print(f"📊 GET ACCESSIBLE DEPTS - User: {user.name}, Role: {user.role}", flush=True)
     
+    # ✅ CRITICAL FIX 1: Early return for super_admin (no query needed)
+    if user.role == "super_admin":
+        print("⚡ Super admin - returning sentinel [0] (no filter)", flush=True)
+        return [0]  # Sentinel: means "access all, don't filter"
+    
+    # ✅ CRITICAL FIX 2: Early return for users without org
     if not user.organization_id:
         print("⚠️ User has no organization - returning empty list", flush=True)
         return []
-
-    if user.role == "super_admin":
-        depts = [dept.id for dept in db.query(Department).all()]
-        print(f"📊 Super admin - All departments: {depts}", flush=True)
-        return depts
-    elif user.role in ["org_admin", "admin"]:
-        depts = [dept.id for dept in db.query(Department).filter(Department.org_id == user.organization_id).all()]
-        print(f"📊 Admin - Org departments: {depts}", flush=True)
-        return depts
-    else:
-        depts = [user.department_id] if user.department_id else []
-        print(f"📊 User - Own department: {depts}", flush=True)
-        return depts
-
+    
+    # ✅ CRITICAL FIX 3: Only query if org_admin/admin
+    if user.role in ["org_admin", "admin"]:
+        # Query only department IDs (not full objects)
+        depts = [dept_id for (dept_id,) in db.query(Department.id).filter(
+            Department.org_id == user.organization_id
+        ).all()]
+        print(f"📊 Admin - Org departments ({len(depts)} depts)", flush=True)
+        return depts or [0]  # Return sentinel if empty
+    
+    # ✅ CRITICAL FIX 4: Regular users - no query at all
+    if user.department_id:
+        print(f"📊 User - Own department: [{user.department_id}]", flush=True)
+        return [user.department_id]
+    
+    print("⚠️ User has no department - returning [0]", flush=True)
+    return [0]  # Sentinel#
+# 
 # def get_accessible_organizations(user: User, db: Session) -> List[int]:
 #     """Dapatkan list organization IDs yang dapat diakses user - ENHANCED VERSION"""
 #     print(f"📊 GET ACCESSIBLE ORGS - User: {user.name}, Role: {user.role}", flush=True)
@@ -217,17 +227,18 @@ def bypass_auth_for_development() -> bool:
 #     return [0]  # Use 0 as sentinel value
 
 def get_accessible_organizations(user: User, db: Session) -> List[int]:
-    """Return list of accessible organization IDs"""
+    """Return list of accessible organization IDs - OPTIMIZED VERSION"""
     print(f"📊 GET ACCESSIBLE ORGS - User: {user.name}, Role: {user.role}", flush=True)
     
-    # Super admin sees all
+    # ✅ CRITICAL FIX 1: Early return for super_admin (no query needed)
     if user.role == "super_admin":
-        orgs = [org.id for org in db.query(Organization).all()]
-        return orgs or [0]
+        print("⚡ Super admin - returning sentinel [0] (no filter)", flush=True)
+        return [0]  # Sentinel: means "access all, don't filter"
     
-    # User with organization
+    # ✅ CRITICAL FIX 2: Regular users - no query at all
     if user.organization_id:
+        print(f"📊 User - Own organization: [{user.organization_id}]", flush=True)
         return [user.organization_id]
     
-    # User without organization - return special value
+    print("⚠️ User has no organization - returning [0]", flush=True)
     return [0]
