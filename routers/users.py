@@ -35,12 +35,9 @@ def get_users(
     
     # Apply filters based on user role
     if current_user.role == 'org_admin':
-        # Org admin can only see users in their organization
         query = query.filter(User.organization_id == current_user.organization_id)
     elif current_user.role == 'dept_head':
-        # Dept head can only see users in their department
         query = query.filter(User.department_id == current_user.department_id)
-    # super_admin can see all users
     
     # Apply additional filters
     if org_id:
@@ -162,12 +159,18 @@ def update_user(
     if current_user.role == 'org_admin':
         if user.organization_id != current_user.organization_id:
             raise HTTPException(403, "Cannot update users in other organizations")
+        # Org admin cannot edit super_admin
+        if user.role == 'super_admin':
+            raise HTTPException(403, "Cannot edit super admin users")
         # Org admin cannot change users to super_admin
         if user_data.role == 'super_admin':
             raise HTTPException(403, "Cannot assign super admin role")
     elif current_user.role == 'dept_head':
         if user.department_id != current_user.department_id:
             raise HTTPException(403, "Cannot update users in other departments")
+        # Dept head cannot edit super_admin or org_admin
+        if user.role in ['super_admin', 'org_admin']:
+            raise HTTPException(403, "Cannot edit admin users")
         # Dept head cannot change role to org_admin or super_admin
         if user_data.role in ['org_admin', 'super_admin']:
             raise HTTPException(403, "Cannot assign admin roles")
@@ -211,13 +214,20 @@ def delete_user(
     if current_user.role == 'org_admin':
         if user.organization_id != current_user.organization_id:
             raise HTTPException(403, "Cannot delete users in other organizations")
+        # Org admin cannot delete super_admin
+        if user.role == 'super_admin':
+            raise HTTPException(403, "Cannot delete super admin users")
     elif current_user.role == 'dept_head':
         if user.department_id != current_user.department_id:
             raise HTTPException(403, "Cannot delete users in other departments")
+        # Dept head cannot delete super_admin or org_admin
+        if user.role in ['super_admin', 'org_admin']:
+            raise HTTPException(403, "Cannot delete admin users")
     
     db.delete(user)
     db.commit()
     return {"message": "User deleted successfully"}
+
 
 @router.get("/organization/{org_id}", response_model=List[UserOut])
 def get_users_by_organization(

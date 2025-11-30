@@ -67,10 +67,14 @@ class UserLogin(BaseModel):
 
 class OrganizationCreate(BaseModel):
     name: str
+    code: str
+    
 
 class DepartmentCreate(BaseModel):
     name: str
+    code: str
     org_id: int
+    parent_id: Optional[int] = None
 
 # ============ Output Schemas (WITH Simple Relations) ============
 
