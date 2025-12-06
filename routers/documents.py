@@ -1,4 +1,4 @@
-# routers/documents.py 
+# routers/documents.py
 
 from io import BytesIO
 import json
@@ -21,9 +21,9 @@ from datetime import datetime, timedelta, timezone
 from utils.authorization import *
 
 from connection.database import SessionLocal
-from models.models import Document, DocumentContent, StatusEnum, Directory, DocumentShare
+from models.models import Document, DocumentCategory, DocumentContent, StatusEnum, Directory, DocumentShare
 from connection.schemas import (
-    DocumentCreate, DocumentOut, ContentOut, BulkActionRequest, DocumentShareCreate, 
+    DocumentCreate, DocumentOut, ContentOut, BulkActionRequest, DocumentShareCreate,
     DocumentShareOut, StatusUpdateResponse
 )
 
@@ -38,145 +38,326 @@ def get_db():
         db.close()
 
 
+def detect_file_category(mimetype: str) -> str:
+    """Auto-detect file category from mimetype"""
+    if not mimetype:
+        return "Other"
+
+    mimetype = mimetype.lower()
+
+    if mimetype.startswith("image/"):
+        return "Photo"
+    elif "word" in mimetype or "msword" in mimetype:
+        return "Word"
+    elif "excel" in mimetype or "spreadsheet" in mimetype:
+        return "Excel"
+    elif "powerpoint" in mimetype or "presentation" in mimetype:
+        return "PowerPoint"
+    elif mimetype == "application/pdf":
+        return "PDF"
+    elif mimetype.startswith("video/"):
+        return "Video"
+    elif mimetype.startswith("audio/"):
+        return "Audio"
+    elif "zip" in mimetype or "compressed" in mimetype or "rar" in mimetype:
+        return "Archive"
+    else:
+        return "Other"
+
+
 @router.post("/", response_model=DocumentOut)
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     title_document: str = Form(None),
     directory_id: int = Form(None),
-    exp_date: str = Form(None),
+
+    # ✅ NEW PARAMETERS
+    file_type: str = Form("Document"),  # Document or File
+    document_category_id: int = Form(None),
+    expire_date: str = Form(None),  # Format: YYYY-MM-DD
+
+    # Existing parameters
     tags: str = Form(None),
     description: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    if not current_user.department_id or not current_user.organization_id:
-        raise HTTPException(400, "User must be assigned to a department and organization")
+    """
+    Upload document with enhanced attributes
 
-    # Check if directory exists and user has access
+    New Fields:
+    - file_type: Document or File
+    - document_category_id: Category for this document (optional)
+    - expire_date: Expiration date (YYYY-MM-DD format)
+
+    Auto-filled:
+    - file_category: Auto-detected from file type
+    - file_owner: Current user's name
+    - department_id: Current user's department
+    - organization_id: Current user's organization
+    """
+
+    print(f"📤 UPLOAD DOCUMENT - User: {current_user.name}", flush=True)
+    print(f"📤 File: {file.filename}, Type: {file_type}", flush=True)
+
+    # Validate user has department and organization
+    if not current_user.department_id or not current_user.organization_id:
+        raise HTTPException(
+            400, "User must be assigned to a department and organization")
+
+    # Check directory access
     if directory_id:
-        directory = db.query(Directory).filter(Directory.id == directory_id).first()
+        directory = db.query(Directory).filter(
+            Directory.id == directory_id).first()
         if not directory:
             raise HTTPException(404, "Directory not found")
         if not can_access_directory(current_user, directory):
             raise HTTPException(403, "Access denied to this directory")
 
-    # Read binary data
+    # ✅ Validate document category if provided
+    if document_category_id:
+        doc_category = db.query(DocumentCategory).filter(
+            DocumentCategory.id == document_category_id
+        ).first()
+        if not doc_category:
+            raise HTTPException(404, "Document category not found")
+        if doc_category.organization_id != current_user.organization_id:
+            raise HTTPException(
+                403, "Invalid document category for your organization")
+        print(f"📁 Using category: {doc_category.name}", flush=True)
+
+    # Read file data
     content_bytes = await file.read()
     size = len(content_bytes)
 
-    # Save document metadata
+    # ✅ Auto-detect file category from mimetype
+    file_category = detect_file_category(file.content_type)
+    print(f"🔍 Detected file category: {file_category}", flush=True)
+
+    # ✅ Parse expire_date
+    parsed_expire_date = None
+    if expire_date:
+        try:
+            parsed_expire_date = datetime.datetime.strptime(
+                expire_date, "%Y-%m-%d")
+            print(f"📅 Expire date set: {parsed_expire_date}", flush=True)
+        except ValueError:
+            raise HTTPException(
+                400, "Invalid expire date format. Use YYYY-MM-DD")
+
+    # ✅ Create document with new attributes
     doc = Document(
         name=file.filename,
         title_document=title_document or file.filename,
+
+        # NEW ATTRIBUTES
+        file_type=file_type,
+        document_category_id=document_category_id,
+        file_category=file_category,
+        file_owner=current_user.name,  # Auto-fill
+        expire_date=parsed_expire_date,
+
+        # Existing attributes
         mimetype=file.content_type,
         size=size,
         data=content_bytes,
         directory_id=directory_id,
         status=StatusEnum.ACTIVE,
-        organization_id=current_user.organization_id,
-        department_id=current_user.department_id,
+        organization_id=current_user.organization_id,  # Auto-fill
+        department_id=current_user.department_id,  # Auto-fill
         created_by=current_user.id
     )
+
     db.add(doc)
     db.commit()
     db.refresh(doc)
 
-    # Save additional metadata if provided
-    if exp_date or tags or description:
+    # Save metadata
+    if tags or description:
         from models.models import DocumentMetadata
-
         metadata = DocumentMetadata(
             document_id=doc.id,
             tags=tags,
             description=description
         )
-
-        if exp_date:
-            try:
-                metadata.exp_date = datetime.strptime(exp_date, "%Y-%m-%d")
-            except ValueError:
-                pass
-
         db.add(metadata)
         db.commit()
 
-    def extract_and_store(doc_id: int, data: bytes, ext: str, mimetype: str):
-        text = ""
-        with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmpf:
-            tmpf.write(data)
-            tmpf.flush()
+    # Background text extraction
+    # Di dalam upload_document function, ganti background task function
 
-            # PDF
+
+    def extract_and_store(doc_id: int, data: bytes, ext: str, mimetype: str):
+        """Extract text from various file formats"""
+        text = ""
+        tmp_path = None
+
+        try:
+            # Create temporary file
+            with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmpf:
+                tmpf.write(data)
+                tmpf.flush()
+                tmp_path = tmpf.name
+
+            # PDF extraction
             if ext.lower() == "pdf":
                 try:
-                    text = extract_text(tmpf.name)
-                except Exception:
+                    from pdfminer.high_level import extract_text
+                    text = extract_text(tmp_path)
+                    print(f"✅ Extracted {len(text)} chars from PDF", flush=True)
+                except Exception as e:
+                    print(f"❌ PDF extraction failed: {e}", flush=True)
                     text = ""
-            # Word .docx / .doc
+
+            # Word documents
             elif ext.lower() in ("docx", "doc"):
                 try:
-                    d = DocxDoc(tmpf.name)
-                    text = "\n".join(p.text for p in d.paragraphs)
-                except Exception:
+                    from docx import Document as DocxDoc
+                    d = DocxDoc(tmp_path)
+                    paragraphs = [p.text for p in d.paragraphs if p.text.strip()]
+                    text = "\n".join(paragraphs)
+                    print(f"✅ Extracted {len(text)} chars from Word", flush=True)
+                except Exception as e:
+                    print(f"❌ Word extraction failed: {e}", flush=True)
                     text = ""
-            # Excel .xlsx
+
+            # Excel spreadsheets
             elif ext.lower() in ("xlsx", "xls"):
                 try:
-                    wb = openpyxl.load_workbook(tmpf.name, read_only=True)
+                    import openpyxl
+                    wb = openpyxl.load_workbook(
+                        tmp_path, read_only=True, data_only=True)
                     parts = []
                     for sheet in wb.worksheets:
                         for row in sheet.iter_rows(values_only=True):
-                            parts.append(" ".join(str(c) for c in row if c is not None))
+                            row_text = " ".join(str(c)
+                                                for c in row if c is not None)
+                            if row_text.strip():
+                                parts.append(row_text)
                     text = "\n".join(parts)
-                except Exception:
+                    wb.close()
+                    print(f"✅ Extracted {len(text)} chars from Excel", flush=True)
+                except Exception as e:
+                    print(f"❌ Excel extraction failed: {e}", flush=True)
                     text = ""
-            # Image OCR (png/jpg/jpeg)
+
+            # PowerPoint presentations
+            elif ext.lower() in ("pptx", "ppt"):
+                try:
+                    from pptx import Presentation
+                    prs = Presentation(tmp_path)
+                    parts = []
+                    for slide in prs.slides:
+                        for shape in slide.shapes:
+                            if hasattr(shape, "text") and shape.text.strip():
+                                parts.append(shape.text)
+                    text = "\n".join(parts)
+                    print(
+                        f"✅ Extracted {len(text)} chars from PowerPoint", flush=True)
+                except Exception as e:
+                    print(f"❌ PowerPoint extraction failed: {e}", flush=True)
+                    text = ""
+
+            # Image OCR
             elif mimetype.startswith("image/"):
                 try:
-                    img = Image.open(tmpf.name)
+                    from PIL import Image
+                    import pytesseract
+                    img = Image.open(tmp_path)
                     text = pytesseract.image_to_string(img)
-                except Exception:
+                    print(
+                        f"✅ Extracted {len(text)} chars from Image (OCR)", flush=True)
+                except Exception as e:
+                    print(f"❌ Image OCR failed: {e}", flush=True)
                     text = ""
-            else:
+
+            # Plain text files
+            elif mimetype.startswith("text/"):
                 try:
-                    img = Image.open(tmpf.name)
-                    text = pytesseract.image_to_string(img)
-                except Exception:
+                    with open(tmp_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        text = f.read()
+                    print(
+                        f"✅ Extracted {len(text)} chars from text file", flush=True)
+                except Exception as e:
+                    print(f"❌ Text extraction failed: {e}", flush=True)
                     text = ""
 
-        db2 = SessionLocal()
-        try:
-            cc = DocumentContent(document_id=doc_id, content=text, ocr_result=text)
-            db2.add(cc)
-            db2.commit()
+            # Store extracted content
+            db2 = SessionLocal()
+            try:
+                # Check if content already exists
+                existing = db2.query(DocumentContent).filter(
+                    DocumentContent.document_id == doc_id
+                ).first()
+
+                if existing:
+                    existing.content = text
+                    existing.ocr_result = text
+                    print(f"📝 Updated content for document {doc_id}", flush=True)
+                else:
+                    cc = DocumentContent(
+                        document_id=doc_id,
+                        content=text,
+                        ocr_result=text
+                    )
+                    db2.add(cc)
+                    print(f"📝 Created content for document {doc_id}", flush=True)
+
+                db2.commit()
+                print(
+                    f"✅ Content saved to database for document {doc_id}", flush=True)
+
+            except Exception as e:
+                print(f"❌ Database error: {e}", flush=True)
+                db2.rollback()
+            finally:
+                db2.close()
+
+        except Exception as e:
+            print(f"❌ Extraction error: {e}", flush=True)
+
         finally:
-            db2.close()
+            # Clean up temporary file
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
 
-    # Schedule background extraction
     ext = file.filename.split(".")[-1]
-    background_tasks.add_task(extract_and_store, doc.id, content_bytes, ext, file.content_type)
+    background_tasks.add_task(
+        extract_and_store, doc.id, content_bytes, ext, file.content_type)
 
+    print(f"✅ Document uploaded: {doc.name} (ID: {doc.id})", flush=True)
     return doc
 
+
+# ========================================
+# LIST DOCUMENTS (UPDATED with eager loading for new fields)
+# ========================================
 
 @router.get("/", response_model=List[DocumentOut])
 def list_documents(
     directory_id: int = None,
     status: Optional[StatusEnum] = Query(StatusEnum.ACTIVE),
+    file_type: Optional[str] = Query(None, description="Filter by file type"),
+    category_id: Optional[int] = Query(None, description="Filter by category"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    """List documents with filtering options"""
     print(f"📄 LIST DOCUMENTS - User: {current_user.name}", flush=True)
 
     accessible_depts = get_accessible_departments(current_user, db)
     accessible_orgs = get_accessible_organizations(current_user, db)
 
-    # ✅ CRITICAL FIX: Defer binary data loading
     query = db.query(Document).options(
         joinedload(Document.department),
         joinedload(Document.organization),
-        defer(Document.data)  # ⬅️ TAMBAHKAN INI
+        joinedload(Document.creator),
+        joinedload(Document.document_category),
+        defer(Document.data)
     ).filter(
         Document.directory_id == directory_id,
         Document.status == status
@@ -188,21 +369,161 @@ def list_documents(
     if accessible_depts != [0]:
         query = query.filter(Document.department_id.in_(accessible_depts))
 
+    if file_type:
+        query = query.filter(Document.file_type == file_type)
+
+    if category_id:
+        query = query.filter(Document.document_category_id == category_id)
+
     documents = query.all()
     print(f"📄 Found {len(documents)} documents", flush=True)
 
     return documents
 
 
+@router.get("/expired", response_model=List[DocumentOut])
+def list_expired_documents(
+    include_archived: bool = Query(
+        False, description="Include already archived documents"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get all expired documents
+    Access: All users (filtered by organization)
+    """
+    print(f"⏰ LIST EXPIRED DOCUMENTS - User: {current_user.name}", flush=True)
+
+    query = db.query(Document).options(
+        joinedload(Document.department),
+        joinedload(Document.organization),
+        joinedload(Document.document_category),
+        defer(Document.data)
+    ).filter(
+        Document.expire_date.isnot(None),
+        Document.expire_date < datetime.utcnow()
+    )
+
+    if not include_archived:
+        query = query.filter(Document.status == StatusEnum.ACTIVE)
+
+    # Filter by user permissions
+    if current_user.role != 'super_admin':
+        query = query.filter(Document.organization_id ==
+                             current_user.organization_id)
+
+    documents = query.all()
+    print(f"⏰ Found {len(documents)} expired documents", flush=True)
+
+    return documents
+
+
+@router.get("/expiring-soon", response_model=List[DocumentOut])
+def list_expiring_soon_documents(
+    days: int = Query(7, ge=1, le=90, description="Days threshold"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get documents expiring within specified days
+    Access: All users (filtered by organization)
+    """
+    print(
+        f"⚠️ LIST EXPIRING SOON - User: {current_user.name}, Days: {days}", flush=True)
+
+    threshold_date = datetime.utcnow() + timedelta(days=days)
+
+    query = db.query(Document).options(
+        joinedload(Document.department),
+        joinedload(Document.organization),
+        joinedload(Document.document_category),
+        defer(Document.data)
+    ).filter(
+        Document.expire_date.isnot(None),
+        Document.expire_date > datetime.utcnow(),
+        Document.expire_date <= threshold_date,
+        Document.status == StatusEnum.ACTIVE
+    )
+
+    # Filter by user permissions
+    if current_user.role != 'super_admin':
+        query = query.filter(Document.organization_id ==
+                             current_user.organization_id)
+
+    documents = query.all()
+    print(f"⚠️ Found {len(documents)} documents expiring soon", flush=True)
+
+    return documents
+
+
+@router.post("/auto-archive-expired")
+def auto_archive_expired(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Manually trigger auto-archive for expired documents
+    Access: super_admin, org_admin only
+    """
+    print(f"🔄 AUTO-ARCHIVE EXPIRED - User: {current_user.name}", flush=True)
+
+    if current_user.role not in ['super_admin', 'org_admin']:
+        raise HTTPException(403, "Only admins can trigger auto-archive")
+
+    # Build query based on role
+    query = db.query(Document).filter(
+        Document.expire_date < datetime.utcnow(),
+        Document.status == StatusEnum.ACTIVE
+    )
+
+    # Org admin can only archive their organization's documents
+    if current_user.role == 'org_admin':
+        query = query.filter(Document.organization_id ==
+                             current_user.organization_id)
+
+    # Archive expired documents
+    affected_count = query.update({
+        Document.status: StatusEnum.ARCHIVED,
+        Document.archived_at: datetime.utcnow()
+    }, synchronize_session=False)
+
+    db.commit()
+
+    print(f"✅ Auto-archived {affected_count} expired documents", flush=True)
+
+    return {
+        "success": True,
+        "message": f"Auto-archived {affected_count} expired documents",
+        "affected_items": affected_count
+    }
+
+
 @router.get("/archived", response_model=List[DocumentOut])
 def list_archived_documents(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
-    """Get all archived documents - OPTIMIZED"""
+    """Get all archived documents"""
     return db.query(Document).options(
         joinedload(Document.department),
-        joinedload(Document.organization)
+        joinedload(Document.organization),
+        joinedload(Document.document_category),
+        defer(Document.data)
     ).filter(Document.status == StatusEnum.ARCHIVED).all()
+
+
+@router.get("/trash", response_model=List[DocumentOut])
+def list_trashed_documents(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get all trashed documents"""
+    return db.query(Document).options(
+        joinedload(Document.department),
+        joinedload(Document.organization),
+        joinedload(Document.document_category),
+        defer(Document.data)
+    ).filter(Document.status == StatusEnum.TRASHED).all()
 
 
 @router.get("/trash", response_model=List[DocumentOut])
@@ -224,39 +545,240 @@ def search_documents(
     folder_id: Optional[int] = Query(None, description="Filter by folder"),
     mimetype: Optional[str] = Query(None, description="Filter by MIME type"),
     status: Optional[StatusEnum] = Query(StatusEnum.ACTIVE, description="Filter by status"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
-    """OPTIMIZED search with eager loading"""
+    """
+    Search documents by title and content (extracted text from files)
+    """
+    print(f"🔍 SEARCH - Query: {q}, Title: {title}, Has words: {has_words}", flush=True)
+    
+    # Base query with eager loading
     query = db.query(Document).options(
         joinedload(Document.department),
-        joinedload(Document.organization)
+        joinedload(Document.organization),
+        joinedload(Document.document_category),
+        defer(Document.data)  # Don't load binary data
     ).filter(Document.status == status)
-
+    
+    # Apply permission filters
+    accessible_depts = get_accessible_departments(current_user, db)
+    accessible_orgs = get_accessible_organizations(current_user, db)
+    
+    if accessible_orgs != [0]:
+        query = query.filter(Document.organization_id.in_(accessible_orgs))
+    
+    if accessible_depts != [0]:
+        query = query.filter(Document.department_id.in_(accessible_depts))
+    
+    # Search in title and content
     if q:
+        # Join with DocumentContent for searching extracted text
         query = query.outerjoin(DocumentContent).filter(
             or_(
                 Document.title_document.ilike(f"%{q}%"),
+                Document.name.ilike(f"%{q}%"),
                 DocumentContent.content.ilike(f"%{q}%")
             )
         )
-
+    
+    # Search by title only
     if title:
-        query = query.filter(Document.title_document.ilike(f"%{title}%"))
-
-    if has_words:
-        for w in has_words.split():
-            query = query.outerjoin(DocumentContent).filter(
-                DocumentContent.content.ilike(f"%{w}%")
+        query = query.filter(
+            or_(
+                Document.title_document.ilike(f"%{title}%"),
+                Document.name.ilike(f"%{title}%")
             )
-
+        )
+    
+    # Search for specific words in content
+    if has_words:
+        words = has_words.split()
+        for word in words:
+            query = query.outerjoin(DocumentContent).filter(
+                DocumentContent.content.ilike(f"%{word}%")
+            )
+    
+    # Filter by folder
     if folder_id is not None:
         query = query.filter(Document.directory_id == folder_id)
-
+    
+    # Filter by mimetype
     if mimetype:
         query = query.filter(Document.mimetype == mimetype)
+    
+    documents = query.distinct().all()
+    print(f"🔍 Found {len(documents)} documents", flush=True)
+    
+    return documents
 
-    return query.distinct().all()
-
+@router.post("/{document_id}/reextract")
+async def reextract_document_content(
+    document_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Re-extract content from document (useful if initial extraction failed)
+    Access: Any user with document access
+    """
+    print(f"🔄 RE-EXTRACT - Document ID: {document_id}", flush=True)
+    
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(404, "Document not found")
+    
+    if not can_access_document(current_user, document, db):
+        raise HTTPException(403, "Access denied")
+    
+    # Extract file extension
+    ext = document.name.split(".")[-1] if "." in document.name else "txt"
+    
+    def extract_and_store(doc_id: int, data: bytes, ext: str, mimetype: str):
+        """Extract text from various file formats"""
+        text = ""
+        tmp_path = None
+        
+        try:
+            # Create temporary file
+            with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmpf:
+                tmpf.write(data)
+                tmpf.flush()
+                tmp_path = tmpf.name
+            
+            # PDF extraction
+            if ext.lower() == "pdf":
+                try:
+                    from pdfminer.high_level import extract_text
+                    text = extract_text(tmp_path)
+                    print(f"✅ Extracted {len(text)} chars from PDF", flush=True)
+                except Exception as e:
+                    print(f"❌ PDF extraction failed: {e}", flush=True)
+                    text = ""
+            
+            # Word documents
+            elif ext.lower() in ("docx", "doc"):
+                try:
+                    from docx import Document as DocxDoc
+                    d = DocxDoc(tmp_path)
+                    paragraphs = [p.text for p in d.paragraphs if p.text.strip()]
+                    text = "\n".join(paragraphs)
+                    print(f"✅ Extracted {len(text)} chars from Word", flush=True)
+                except Exception as e:
+                    print(f"❌ Word extraction failed: {e}", flush=True)
+                    text = ""
+            
+            # Excel spreadsheets
+            elif ext.lower() in ("xlsx", "xls"):
+                try:
+                    import openpyxl
+                    wb = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
+                    parts = []
+                    for sheet in wb.worksheets:
+                        for row in sheet.iter_rows(values_only=True):
+                            row_text = " ".join(str(c) for c in row if c is not None)
+                            if row_text.strip():
+                                parts.append(row_text)
+                    text = "\n".join(parts)
+                    wb.close()
+                    print(f"✅ Extracted {len(text)} chars from Excel", flush=True)
+                except Exception as e:
+                    print(f"❌ Excel extraction failed: {e}", flush=True)
+                    text = ""
+            
+            # PowerPoint presentations
+            elif ext.lower() in ("pptx", "ppt"):
+                try:
+                    from pptx import Presentation
+                    prs = Presentation(tmp_path)
+                    parts = []
+                    for slide in prs.slides:
+                        for shape in slide.shapes:
+                            if hasattr(shape, "text") and shape.text.strip():
+                                parts.append(shape.text)
+                    text = "\n".join(parts)
+                    print(f"✅ Extracted {len(text)} chars from PowerPoint", flush=True)
+                except Exception as e:
+                    print(f"❌ PowerPoint extraction failed: {e}", flush=True)
+                    text = ""
+            
+            # Image OCR
+            elif mimetype.startswith("image/"):
+                try:
+                    from PIL import Image
+                    import pytesseract
+                    img = Image.open(tmp_path)
+                    text = pytesseract.image_to_string(img)
+                    print(f"✅ Extracted {len(text)} chars from Image (OCR)", flush=True)
+                except Exception as e:
+                    print(f"❌ Image OCR failed: {e}", flush=True)
+                    text = ""
+            
+            # Plain text files
+            elif mimetype.startswith("text/"):
+                try:
+                    with open(tmp_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        text = f.read()
+                    print(f"✅ Extracted {len(text)} chars from text file", flush=True)
+                except Exception as e:
+                    print(f"❌ Text extraction failed: {e}", flush=True)
+                    text = ""
+            
+            # Store extracted content
+            db2 = SessionLocal()
+            try:
+                # Check if content already exists
+                existing = db2.query(DocumentContent).filter(
+                    DocumentContent.document_id == doc_id
+                ).first()
+                
+                if existing:
+                    existing.content = text
+                    existing.ocr_result = text
+                    print(f"📝 Updated content for document {doc_id}", flush=True)
+                else:
+                    cc = DocumentContent(
+                        document_id=doc_id, 
+                        content=text, 
+                        ocr_result=text
+                    )
+                    db2.add(cc)
+                    print(f"📝 Created content for document {doc_id}", flush=True)
+                
+                db2.commit()
+                print(f"✅ Content saved to database for document {doc_id}", flush=True)
+                
+            except Exception as e:
+                print(f"❌ Database error: {e}", flush=True)
+                db2.rollback()
+            finally:
+                db2.close()
+        
+        except Exception as e:
+            print(f"❌ Extraction error: {e}", flush=True)
+        
+        finally:
+            # Clean up temporary file
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+    
+    background_tasks.add_task(
+        extract_and_store, 
+        document.id, 
+        document.data, 
+        ext, 
+        document.mimetype
+    )
+    
+    return {
+        "success": True,
+        "message": "Content extraction started in background",
+        "document_id": document_id
+    }
 
 @router.put("/{document_id}/archive", response_model=StatusUpdateResponse)
 def archive_document(
@@ -269,7 +791,8 @@ def archive_document(
         raise HTTPException(404, "Document not found")
 
     if document.status != StatusEnum.ACTIVE:
-        raise HTTPException(400, f"Cannot archive document with status: {document.status.value}")
+        raise HTTPException(
+            400, f"Cannot archive document with status: {document.status.value}")
 
     document.status = StatusEnum.ARCHIVED
     document.archived_at = datetime.utcnow()
@@ -298,9 +821,11 @@ def restore_document(
 
     # Check if parent directory exists and is active (if has parent)
     if document.directory_id:
-        directory = db.query(Directory).filter(Directory.id == document.directory_id).first()
+        directory = db.query(Directory).filter(
+            Directory.id == document.directory_id).first()
         if not directory or directory.status != StatusEnum.ACTIVE:
-            raise HTTPException(400, "Cannot restore: parent directory is not active")
+            raise HTTPException(
+                400, "Cannot restore: parent directory is not active")
 
     document.status = StatusEnum.ACTIVE
     document.archived_at = None
@@ -432,11 +957,12 @@ def bulk_restore_documents(
 
     affected_count = 0
     valid_doc_ids = []
-    
+
     for doc in documents:
         # Check parent directory status
         if doc.directory_id:
-            directory = db.query(Directory).filter(Directory.id == doc.directory_id).first()
+            directory = db.query(Directory).filter(
+                Directory.id == doc.directory_id).first()
             if not directory or directory.status != StatusEnum.ACTIVE:
                 continue
         valid_doc_ids.append(doc.id)
@@ -509,7 +1035,8 @@ async def preview_document(
             total_pages = len(pdf_document)
             if page > total_pages:
                 pdf_document.close()
-                raise HTTPException(400, f"Page {page} exceeds document length {total_pages}")
+                raise HTTPException(
+                    400, f"Page {page} exceeds document length {total_pages}")
 
             pdf_page = pdf_document[page - 1]
             mat = fitz.Matrix(2, 2)
@@ -554,15 +1081,18 @@ async def preview_document(
 
             try:
                 docx_doc = DocxDoc(tmp_docx_path)
-                html_parts = ['<!DOCTYPE html><html><head><meta charset="UTF-8">']
-                html_parts.append('<style>body{font-family:Arial,sans-serif;padding:20px;max-width:800px;margin:0 auto;}</style>')
+                html_parts = [
+                    '<!DOCTYPE html><html><head><meta charset="UTF-8">']
+                html_parts.append(
+                    '<style>body{font-family:Arial,sans-serif;padding:20px;max-width:800px;margin:0 auto;}</style>')
                 html_parts.append('</head><body>')
 
                 for i, para in enumerate(docx_doc.paragraphs[:100]):
                     if para.text.strip():
                         html_parts.append(f'<p>{para.text}</p>')
                     if i >= 99:
-                        html_parts.append('<p><em>... (content truncated for preview)</em></p>')
+                        html_parts.append(
+                            '<p><em>... (content truncated for preview)</em></p>')
                         break
 
                 html_parts.append('</body></html>')
@@ -577,7 +1107,8 @@ async def preview_document(
                 if os.path.exists(tmp_docx_path):
                     os.remove(tmp_docx_path)
         except Exception as e:
-            raise HTTPException(500, f"Error processing Word document: {str(e)}")
+            raise HTTPException(
+                500, f"Error processing Word document: {str(e)}")
     else:
         raise HTTPException(400, f"Preview not supported for {mimetype}")
 
@@ -622,7 +1153,8 @@ async def get_document_info(
     if document.mimetype == "application/pdf":
         try:
             import fitz
-            pdf_document = fitz.open(stream=BytesIO(document.data), filetype="pdf")
+            pdf_document = fitz.open(
+                stream=BytesIO(document.data), filetype="pdf")
             info["total_pages"] = len(pdf_document)
             pdf_document.close()
         except:
@@ -1107,28 +1639,28 @@ async def preview_word(
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(404, "Document not found")
-    
+
     if not document.mimetype in [
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/msword"
     ]:
         raise HTTPException(400, "Not a Word document")
-    
+
     try:
         # Create temporary file
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             tmp.write(document.data)
             tmp_path = tmp.name
-        
+
         # Read Word document
         doc = DocxDoc(tmp_path)
-        
+
         # Extract text content
         full_text = []
         for para in doc.paragraphs:
             if para.text.strip():
                 full_text.append(f"<p>{para.text}</p>")
-        
+
         # Extract tables
         for table in doc.tables:
             table_html = "<table class='word-table'>"
@@ -1139,10 +1671,10 @@ async def preview_word(
                 table_html += "</tr>"
             table_html += "</table>"
             full_text.append(table_html)
-        
+
         # Clean up
         os.unlink(tmp_path)
-        
+
         # Return HTML response
         full_html = f"""
         <!DOCTYPE html>
@@ -1186,11 +1718,12 @@ async def preview_word(
         </body>
         </html>
         """
-        
+
         return Response(content=full_html, media_type="text/html")
-        
+
     except Exception as e:
         raise HTTPException(500, f"Error processing Word document: {str(e)}")
+
 
 @router.get("/{document_id}/preview/ppt")
 async def preview_ppt(
@@ -1202,32 +1735,32 @@ async def preview_ppt(
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(404, "Document not found")
-    
+
     if not document.mimetype in [
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "application/vnd.ms-powerpoint"
     ]:
         raise HTTPException(400, "Not a PowerPoint file")
-    
+
     try:
         # Create temporary file
         with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
             tmp.write(document.data)
             tmp_path = tmp.name
-        
+
         # Read PowerPoint file
         prs = Presentation(tmp_path)
-        
+
         # Generate HTML with better slide formatting
         slides_html = []
         for i, slide in enumerate(prs.slides):
             slide_content = []
-            
+
             # Add slide title if exists
             title = ""
             if slide.shapes.title:
                 title = slide.shapes.title.text
-            
+
             # Process all shapes
             for shape in slide.shapes:
                 if hasattr(shape, "text") and shape.text.strip():
@@ -1247,7 +1780,7 @@ async def preview_ppt(
                             slide_content.append(bullet_list)
                         else:
                             slide_content.append(f"<p>{text}</p>")
-            
+
             slides_html.append(f"""
             <div class="slide">
                 <div class="slide-header">
@@ -1259,10 +1792,10 @@ async def preview_ppt(
                 </div>
             </div>
             """)
-        
+
         # Clean up
         os.unlink(tmp_path)
-        
+
         # Return HTML response
         full_html = f"""
         <!DOCTYPE html>
@@ -1345,11 +1878,12 @@ async def preview_ppt(
         </body>
         </html>
         """
-        
+
         return Response(content=full_html, media_type="text/html")
-        
+
     except Exception as e:
         raise HTTPException(500, f"Error processing PowerPoint file: {str(e)}")
+
 
 @router.get("/{document_id}/content/text")
 async def get_document_text_content(
@@ -1361,15 +1895,15 @@ async def get_document_text_content(
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(404, "Document not found")
-    
+
     try:
         text_content = ""
-        
+
         # Create temporary file
         with tempfile.NamedTemporaryFile(suffix=f".{document.name.split('.')[-1]}", delete=False) as tmp:
             tmp.write(document.data)
             tmp_path = tmp.name
-        
+
         # Extract text based on file type
         if document.mimetype in [
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1377,8 +1911,9 @@ async def get_document_text_content(
         ]:
             # Word document
             doc = DocxDoc(tmp_path)
-            text_content = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
-            
+            text_content = "\n".join(
+                [para.text for para in doc.paragraphs if para.text.strip()])
+
         elif document.mimetype in [
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "application/vnd.ms-excel"
@@ -1386,7 +1921,7 @@ async def get_document_text_content(
             # Excel document - extract from first sheet
             df = pd.read_excel(tmp_path, sheet_name=0)
             text_content = df.to_string(index=False)
-            
+
         elif document.mimetype in [
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             "application/vnd.ms-powerpoint"
@@ -1399,18 +1934,19 @@ async def get_document_text_content(
                     if hasattr(shape, "text") and shape.text.strip():
                         text_content += f"{shape.text}\n"
                 text_content += "\n"
-        
+
         else:
             # Try to extract text using existing method
-            doc_content = db.query(DocumentContent).filter(DocumentContent.document_id == document_id).first()
+            doc_content = db.query(DocumentContent).filter(
+                DocumentContent.document_id == document_id).first()
             if doc_content and doc_content.content:
                 text_content = doc_content.content
             else:
                 text_content = "No readable content found"
-        
+
         # Clean up
         os.unlink(tmp_path)
-        
+
         return {
             "id": document.id,
             "name": document.name,
@@ -1419,9 +1955,11 @@ async def get_document_text_content(
             "content": text_content,
             "size": document.size
         }
-        
+
     except Exception as e:
-        raise HTTPException(500, f"Error extracting document content: {str(e)}")
+        raise HTTPException(
+            500, f"Error extracting document content: {str(e)}")
+
 
 @router.put("/{document_id}/content/text")
 async def update_document_text_content(
@@ -1434,18 +1972,19 @@ async def update_document_text_content(
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(404, "Document not found")
-    
+
     # For now, we'll update the DocumentContent table
     # In a real implementation, you'd want to update the actual Office file
-    doc_content = db.query(DocumentContent).filter(DocumentContent.document_id == document_id).first()
-    
+    doc_content = db.query(DocumentContent).filter(
+        DocumentContent.document_id == document_id).first()
+
     if not doc_content:
         doc_content = DocumentContent(document_id=document_id)
-    
+
     doc_content.content = content_update.get("content", "")
     doc_content.ocr_result = content_update.get("content", "")
-    
+
     db.add(doc_content)
     db.commit()
-    
+
     return {"message": "Document content updated successfully"}

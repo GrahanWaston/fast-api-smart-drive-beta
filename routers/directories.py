@@ -448,3 +448,23 @@ def bulk_delete_directories_permanent(
         message=f"Successfully deleted {affected_count} directories permanently",
         affected_items=affected_count
     )
+
+@router.get("/{directory_id}")
+def get_directory(
+    directory_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get single directory details"""
+    directory = db.query(Directory).options(
+        joinedload(Directory.department),
+        joinedload(Directory.organization)
+    ).filter(Directory.id == directory_id).first()
+    
+    if not directory:
+        raise HTTPException(404, "Directory not found")
+    
+    if not can_access_directory(current_user, directory):
+        raise HTTPException(403, "Access denied")
+    
+    return directory

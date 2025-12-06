@@ -8,36 +8,67 @@ class StatusEnum(str, Enum):
     ARCHIVED = "archived"
     TRASHED = "trashed"
 
-# ============ Simple Base Schemas (No Relations) ============
+# ============ Simple Base Schemas ============
 
 class OrganizationSimple(BaseModel):
-    """Organization without relations"""
     id: int
     name: str
     code: str
     status: str
     created_at: datetime
-    
     model_config = ConfigDict(from_attributes=True)
 
 class DepartmentSimple(BaseModel):
-    """Department without relations"""
     id: int
     name: str
     code: str
     org_id: int
-    
     model_config = ConfigDict(from_attributes=True)
 
 class UserSimple(BaseModel):
-    """User without relations"""
     id: int
     name: str
     email: EmailStr
     department_id: Optional[int] = None
     organization_id: Optional[int] = None
     role: str
-    
+    model_config = ConfigDict(from_attributes=True)
+
+# ============ NEW: Document Category Schemas ============
+
+class DocumentCategorySimple(BaseModel):
+    """Document Category without relations"""
+    id: int
+    name: str
+    code: str
+    description: Optional[str] = None
+    organization_id: int
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+class DocumentCategoryCreate(BaseModel):
+    name: str
+    code: str
+    description: Optional[str] = None
+    organization_id: int
+
+class DocumentCategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    code: Optional[str] = None
+    description: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class DocumentCategoryOut(BaseModel):
+    id: int
+    name: str
+    code: str
+    description: Optional[str] = None
+    organization_id: int
+    created_at: datetime
+    created_by: Optional[int] = None
+    organization: Optional[OrganizationSimple] = None
+    creator: Optional[UserSimple] = None
     model_config = ConfigDict(from_attributes=True)
 
 # ============ Create Schemas ============
@@ -52,6 +83,10 @@ class DirectoryCreate(BaseModel):
 class DocumentCreate(BaseModel):
     title_document: Optional[str] = None
     directory_id: Optional[int] = None
+    
+    file_type: Optional[str] = "Document"
+    document_category_id: Optional[int] = None
+    expire_date: Optional[str] = None  
 
 class UserCreate(BaseModel):
     name: str
@@ -68,7 +103,6 @@ class UserLogin(BaseModel):
 class OrganizationCreate(BaseModel):
     name: str
     code: str
-    
 
 class DepartmentCreate(BaseModel):
     name: str
@@ -76,7 +110,7 @@ class DepartmentCreate(BaseModel):
     org_id: int
     parent_id: Optional[int] = None
 
-# ============ Output Schemas (WITH Simple Relations) ============
+# ============ Output Schemas ============
 
 class DirectoryOut(BaseModel):
     id: int
@@ -90,17 +124,21 @@ class DirectoryOut(BaseModel):
     trashed_at: Optional[datetime] = None
     department_id: int
     organization_id: int
-    
-    # Use simple versions to avoid recursion
     department: Optional[DepartmentSimple] = None
     organization: Optional[OrganizationSimple] = None
-    
     model_config = ConfigDict(from_attributes=True)
 
 class DocumentOut(BaseModel):
     id: int
     name: str
     title_document: Optional[str]
+    
+    file_type: Optional[str] = "Document"
+    document_category_id: Optional[int] = None
+    file_category: Optional[str] = None
+    file_owner: Optional[str] = None
+    expire_date: Optional[datetime] = None
+    
     mimetype: str
     size: int
     total_pages: int
@@ -113,10 +151,10 @@ class DocumentOut(BaseModel):
     organization_id: int
     created_by: Optional[int] = None
     
-    # Use simple versions to avoid recursion
     department: Optional[DepartmentSimple] = None
     organization: Optional[OrganizationSimple] = None
     creator: Optional[UserSimple] = None
+    document_category: Optional[DocumentCategorySimple] = None  
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -127,11 +165,8 @@ class UserOut(BaseModel):
     department_id: Optional[int]
     organization_id: Optional[int]
     role: str
-    
-    # Use simple versions to avoid recursion
     department: Optional[DepartmentSimple] = None
     organization: Optional[OrganizationSimple] = None
-    
     model_config = ConfigDict(from_attributes=True)
 
 class OrganizationOut(BaseModel):
@@ -140,8 +175,6 @@ class OrganizationOut(BaseModel):
     code: str
     status: str
     created_at: datetime
-    
-    # NO nested lists to avoid recursion
     model_config = ConfigDict(from_attributes=True)
 
 class DepartmentOut(BaseModel):
@@ -149,11 +182,8 @@ class DepartmentOut(BaseModel):
     name: str
     code: str
     org_id: int
-    
-    # Only include org (simple), no users/subdepts lists
     org: Optional[OrganizationSimple] = None
     parent: Optional[DepartmentSimple] = None
-    
     model_config = ConfigDict(from_attributes=True)
 
 # ============ Other Schemas ============
@@ -162,7 +192,6 @@ class ContentOut(BaseModel):
     id: int
     content: Optional[str]
     ocr_result: Optional[str]
-    
     model_config = ConfigDict(from_attributes=True)
 
 class MetadataOut(BaseModel):
@@ -171,7 +200,6 @@ class MetadataOut(BaseModel):
     author: Optional[str]
     description: Optional[str]
     tags: Optional[str]
-    
     model_config = ConfigDict(from_attributes=True)
 
 class Token(BaseModel):
@@ -197,7 +225,6 @@ class ActivityLogOut(BaseModel):
     client_ip: Optional[str] = None
     user_id: Optional[int] = None
     response_status: str
-    
     model_config = ConfigDict(from_attributes=True)
 
 class UserUpdate(BaseModel):
@@ -207,7 +234,6 @@ class UserUpdate(BaseModel):
     department_id: Optional[int] = None
     organization_id: Optional[int] = None
     role: Optional[str] = None
-    
     class Config:
         from_attributes = True
 
@@ -215,8 +241,7 @@ class DocumentShareCreate(BaseModel):
     target_user_id: Optional[int] = None
     target_department_id: Optional[int] = None
     target_organization_id: Optional[int] = None
-    expires_in: Optional[int] = 7  # days
-
+    expires_in: Optional[int] = 7
     class Config:
         from_attributes = True
 
@@ -230,32 +255,22 @@ class DocumentShareOut(BaseModel):
     share_token: str
     expires_at: datetime
     created_at: datetime
-
     class Config:
         from_attributes = True
-    
+
 class MetadataBase(BaseModel):
     status: Optional[str]
     author: Optional[str]
     description: Optional[str]
     tags: Optional[str]
 
-
 class MetadataCreate(MetadataBase):
     document_id: int
 
-
-class MetadataOut(MetadataBase):
-    id: int
-
-    class Config:
-        orm_mode = True
-        
 class OrganizationUpdate(BaseModel):
     name: Optional[str] = None
     code: Optional[str] = None
     status: Optional[str] = None
-    
     class Config:
         from_attributes = True
 
@@ -264,6 +279,5 @@ class DepartmentUpdate(BaseModel):
     code: Optional[str] = None
     org_id: Optional[int] = None
     parent_id: Optional[int] = None
-    
     class Config:
         from_attributes = True

@@ -31,30 +31,58 @@ class Directory(Base):
     documents    = relationship("Document", backref="directory")
     organization = relationship("Organization", backref="directories")
     department   = relationship("Department", backref="directories")
+    
+class DocumentCategory(Base):
+    __tablename__ = "document_categories"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    code = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    
+    # Relationships
+    organization = relationship("Organization", backref="document_categories")
+    creator = relationship("User", foreign_keys=[created_by], backref="created_categories")
+
+
 
 class Document(Base):
     __tablename__ = "documents"
-    id             = Column(Integer, primary_key=True, index=True)
-    name           = Column(String, nullable=False)
-    title_document = Column(String, nullable=True, index=True)
-    mimetype       = Column(String, nullable=False, index=True)
-    size           = Column(Integer, nullable=False)
-    data           = Column(LargeBinary, nullable=False)   
-    total_pages    = Column(Integer, default=0)
-    directory_id   = Column(Integer, ForeignKey("directories.id", ondelete="SET NULL"), nullable=True)
-    status         = Column(Enum(StatusEnum), default=StatusEnum.ACTIVE, index=True)  
-    archived_at    = Column(DateTime, nullable=True)  
-    trashed_at     = Column(DateTime, nullable=True)   
-    created_at     = Column(DateTime, default=datetime.utcnow, index=True)
-    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
-    department_id   = Column(Integer, ForeignKey("departments.id", ondelete="CASCADE"), nullable=False)
-    created_by      = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     
-    contents       = relationship("DocumentContent", backref="document", cascade="all, delete")
-    metadatas      = relationship("DocumentMetadata", backref="document", uselist=False, cascade="all, delete")
-    organization   = relationship("Organization", backref="documents")
-    department     = relationship("Department", backref="documents")
-    creator        = relationship("User", backref="documents")
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    title_document = Column(String, nullable=True, index=True)
+    
+    file_type = Column(String(50), default="Document", index=True)  
+    document_category_id = Column(Integer, ForeignKey("document_categories.id", ondelete="SET NULL"), nullable=True)
+    file_category = Column(String(50), nullable=True, index=True)  
+    file_owner = Column(String(255), nullable=True)  
+    expire_date = Column(DateTime, nullable=True, index=True)  
+    
+    # Existing attributes
+    mimetype = Column(String, nullable=False, index=True)
+    size = Column(Integer, nullable=False)
+    data = Column(LargeBinary, nullable=False)
+    total_pages = Column(Integer, default=0)
+    directory_id = Column(Integer, ForeignKey("directories.id", ondelete="SET NULL"), nullable=True)
+    status = Column(Enum(StatusEnum), default=StatusEnum.ACTIVE, index=True)
+    archived_at = Column(DateTime, nullable=True)
+    trashed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    department_id = Column(Integer, ForeignKey("departments.id", ondelete="CASCADE"), nullable=False)
+    created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    
+    # Relationships
+    contents = relationship("DocumentContent", backref="document", cascade="all, delete")
+    metadatas = relationship("DocumentMetadata", backref="document", uselist=False, cascade="all, delete")
+    organization = relationship("Organization", backref="documents")
+    department = relationship("Department", backref="documents")
+    creator = relationship("User", foreign_keys=[created_by], backref="documents")
+    document_category = relationship("DocumentCategory", backref="documents")  
 
 class DocumentContent(Base):
     __tablename__ = "document_contents"
