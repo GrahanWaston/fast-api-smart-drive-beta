@@ -25,7 +25,7 @@ def get_db():
 
 def update_children_status_recursive(db: Session, parent_id: int, status: StatusEnum, timestamp_field: str):
     """Recursively update status - OPTIMIZED with bulk operations"""
-    timestamp = datetime.utcnow()
+    timestamp = datetime.datetime.utcnow()
     
     # Get all child directory IDs recursively
     child_dir_ids = []
@@ -203,7 +203,7 @@ def archive_directory(
     
     # Archive the directory
     directory.status = StatusEnum.ARCHIVED
-    directory.archived_at = datetime.utcnow()
+    directory.archived_at = datetime.datetime.utcnow()
     db.add(directory)
     
     # Archive all children recursively (now optimized)
@@ -269,7 +269,7 @@ def move_directory_to_trash(
         raise HTTPException(400, "Directory is already in trash")
     
     directory.status = StatusEnum.TRASHED
-    directory.trashed_at = datetime.utcnow()
+    directory.trashed_at = datetime.datetime.utcnow()
     db.add(directory)
     
     # Move all children to trash (optimized)
@@ -344,7 +344,7 @@ def bulk_archive_directories(
     affected_count = 0
     for directory in directories:
         directory.status = StatusEnum.ARCHIVED
-        directory.archived_at = datetime.utcnow()
+        directory.archived_at = datetime.datetime.utcnow()
         db.add(directory)
         update_children_status_recursive(db, directory.id, StatusEnum.ARCHIVED, "archived_at")
         affected_count += 1
@@ -375,7 +375,7 @@ def bulk_trash_directories(
     affected_count = 0
     for directory in directories:
         directory.status = StatusEnum.TRASHED
-        directory.trashed_at = datetime.utcnow()
+        directory.trashed_at = datetime.datetime.utcnow()
         db.add(directory)
         update_children_status_recursive(db, directory.id, StatusEnum.TRASHED, "trashed_at")
         affected_count += 1

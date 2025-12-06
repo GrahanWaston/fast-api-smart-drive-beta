@@ -23,7 +23,7 @@ from utils.authorization import *
 from connection.database import SessionLocal
 from models.models import Document, DocumentCategory, DocumentContent, StatusEnum, Directory, DocumentShare
 from connection.schemas import (
-    DocumentCreate, DocumentOut, ContentOut, BulkActionRequest, DocumentShareCreate,
+    DocumentCategoryOut, DocumentCreate, DocumentOut, ContentOut, BulkActionRequest, DocumentShareCreate,
     DocumentShareOut, StatusUpdateResponse
 )
 
@@ -401,7 +401,7 @@ def list_expired_documents(
         defer(Document.data)
     ).filter(
         Document.expire_date.isnot(None),
-        Document.expire_date < datetime.utcnow()
+        Document.expire_date < datetime.datetime.utcnow()
     )
 
     if not include_archived:
@@ -431,7 +431,7 @@ def list_expiring_soon_documents(
     print(
         f"⚠️ LIST EXPIRING SOON - User: {current_user.name}, Days: {days}", flush=True)
 
-    threshold_date = datetime.utcnow() + timedelta(days=days)
+    threshold_date = datetime.datetime.utcnow() + timedelta(days=days)
 
     query = db.query(Document).options(
         joinedload(Document.department),
@@ -440,7 +440,7 @@ def list_expiring_soon_documents(
         defer(Document.data)
     ).filter(
         Document.expire_date.isnot(None),
-        Document.expire_date > datetime.utcnow(),
+        Document.expire_date > datetime.datetime.utcnow(),
         Document.expire_date <= threshold_date,
         Document.status == StatusEnum.ACTIVE
     )
@@ -472,7 +472,7 @@ def auto_archive_expired(
 
     # Build query based on role
     query = db.query(Document).filter(
-        Document.expire_date < datetime.utcnow(),
+        Document.expire_date < datetime.datetime.utcnow(),
         Document.status == StatusEnum.ACTIVE
     )
 
@@ -484,7 +484,7 @@ def auto_archive_expired(
     # Archive expired documents
     affected_count = query.update({
         Document.status: StatusEnum.ARCHIVED,
-        Document.archived_at: datetime.utcnow()
+        Document.archived_at: datetime.datetime.utcnow()
     }, synchronize_session=False)
 
     db.commit()
@@ -611,6 +611,318 @@ def search_documents(
     print(f"🔍 Found {len(documents)} documents", flush=True)
     
     return documents
+
+@router.get("/advanced-search", response_model=List[DocumentOut])
+def advanced_search_documents(
+    keyword: Optional[str] = Query(None),
+    file_type: Optional[str] = Query(None),
+    document_category_id: Optional[int] = Query(None),
+    file_category: Optional[str] = Query(None),
+    file_owner: Optional[str] = Query(None),
+    expire_from: Optional[str] = Query(None),
+    expire_to: Optional[str] = Query(None),
+    created_from: Optional[str] = Query(None),
+    created_to: Optional[str] = Query(None),
+    expire_status: Optional[str] = Query(None),
+
+    # FIX: support both org_id (frontend) and organization_id (backend)
+    organization_id: Optional[int] = Query(None),
+    org_id: Optional[int] = Query(None),
+
+    department_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Corrected & professional advanced search – stable and secure.
+    """
+
+    # Normalize org_id
+    if org_id and not organization_id:
+        organization_id = org_id
+
+    # Base query
+    query = db.query(Document).filter(Document.status == StatusEnum.ACTIVE)
+
+    # Authorization
+    accessible_orgs = get_accessible_organizations(current_user, db)
+    accessible_depts = get_accessible_departments(current_user, db)
+
+    # 1) Limit by accessible orgs
+    if accessible_orgs != [0]:
+        query = query.filter(Document.organization_id.in_(accessible_orgs))
+
+    # 2) Limit by accessible departments
+    if accessible_depts != [0]:
+        query = query.filter(Document.department_id.in_(accessible_depts))
+
+    # Extra rule: non-super-admin cannot request another org
+    if organization_id:
+        if current_user.role != "super_admin" and organization_id not in accessible_orgs:
+            raise HTTPException(status_code=403, detail="Unauthorized organization filter")
+
+    # Apply explicit org/admin filters
+    if organization_id:
+        query = query.filter(Document.organization_id == organization_id)
+
+    if department_id:
+        # org_admin boleh filter dept, user hanya dept dalam accessible_depts
+        if department_id not in accessible_depts and current_user.role != 'super_admin':
+            raise HTTPException(403, "Unauthorized department filter")
+        query = query.filter(Document.department_id == department_id)
+
+    # Keyword
+    if keyword:
+        query = query.outerjoin(DocumentContent).filter(
+            or_(
+                Document.name.ilike(f"%{keyword}%"),
+                Document.title_document.ilike(f"%{keyword}%"),
+                DocumentContent.content.ilike(f"%{keyword}%")
+            )
+        )
+
+    # File type
+    if file_type:
+        query = query.filter(Document.file_type == file_type)
+
+    # Document category
+    if document_category_id:
+        query = query.filter(Document.document_category_id == document_category_id)
+
+    # File category
+    if file_category:
+        query = query.filter(Document.file_category == file_category)
+
+    # File owner
+    if file_owner:
+        query = query.filter(Document.file_owner.ilike(f"%{file_owner}%"))
+
+    # Date parsing helper
+    def parse_date(val: str):
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(val, fmt)
+            except:
+                pass
+        raise ValueError("Invalid date format")
+
+    # Expire from/to
+    if expire_from:
+        try:
+            d = parse_date(expire_from)
+            query = query.filter(Document.expire_date.isnot(None),
+                                 Document.expire_date >= d)
+        except:
+            pass
+
+    if expire_to:
+        try:
+            d = parse_date(expire_to) + timedelta(days=1)
+            query = query.filter(Document.expire_date.isnot(None),
+                                 Document.expire_date < d)
+        except:
+            pass
+
+    # Expiration status
+    now = datetime.datetime.utcnow()
+    if expire_status == "valid":
+        future7 = now + timedelta(days=7)
+        query = query.filter(Document.expire_date > future7)
+
+    elif expire_status == "expiring-soon":
+        future7 = now + timedelta(days=7)
+        query = query.filter(
+            Document.expire_date.isnot(None),
+            Document.expire_date > now,
+            Document.expire_date <= future7
+        )
+
+    elif expire_status == "expired":
+        query = query.filter(
+            Document.expire_date.isnot(None),
+            Document.expire_date < now
+        )
+
+    # Created date
+    if created_from:
+        try:
+            d = parse_date(created_from)
+            query = query.filter(Document.created_at >= d)
+        except:
+            pass
+
+    if created_to:
+        try:
+            d = parse_date(created_to) + timedelta(days=1)
+            query = query.filter(Document.created_at < d)
+        except:
+            pass
+
+    # Eager loading
+    query = query.options(
+        joinedload(Document.organization),
+        joinedload(Document.department),
+        joinedload(Document.creator),
+        joinedload(Document.document_category),
+        defer(Document.data)
+    )
+
+    results = query.distinct().order_by(Document.created_at.desc()).all()
+    return results
+
+@router.post("/reextract-all")
+async def reextract_all_documents(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Re-extract content for all documents that have empty content
+    Access: super_admin, org_admin
+    """
+    print(f"🔄 RE-EXTRACT ALL - User: {current_user.name}", flush=True)
+    
+    if current_user.role not in ['super_admin', 'org_admin']:
+        raise HTTPException(403, "Only admins can trigger bulk re-extraction")
+    
+    # Find documents with empty or missing content
+    query = db.query(Document).outerjoin(DocumentContent).filter(
+        or_(
+            DocumentContent.content == None,
+            DocumentContent.content == ""
+        )
+    )
+    
+    # Org admin only their organization
+    if current_user.role == 'org_admin':
+        query = query.filter(Document.organization_id == current_user.organization_id)
+    
+    docs = query.all()
+    
+    print(f"📋 Found {len(docs)} documents with empty content", flush=True)
+    
+    # Extract content for each document in background
+    for doc in docs:
+        ext = doc.name.split(".")[-1] if "." in doc.name else "txt"
+        
+        # Use the same extract_and_store function from upload
+        def extract_and_store(doc_id: int, data: bytes, ext: str, mimetype: str):
+            text = ""
+            tmp_path = None
+            
+            try:
+                with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmpf:
+                    tmpf.write(data)
+                    tmpf.flush()
+                    tmp_path = tmpf.name
+                
+                # PDF extraction
+                if ext.lower() == "pdf":
+                    try:
+                        text = extract_text(tmp_path)
+                        print(f"✅ Extracted {len(text)} chars from PDF {doc_id}", flush=True)
+                    except Exception as e:
+                        print(f"❌ PDF extraction failed for {doc_id}: {e}", flush=True)
+                
+                # Word documents
+                elif ext.lower() in ("docx", "doc"):
+                    try:
+                        d = DocxDoc(tmp_path)
+                        paragraphs = [p.text for p in d.paragraphs if p.text.strip()]
+                        text = "\n".join(paragraphs)
+                        print(f"✅ Extracted {len(text)} chars from Word {doc_id}", flush=True)
+                    except Exception as e:
+                        print(f"❌ Word extraction failed for {doc_id}: {e}", flush=True)
+                
+                # Excel spreadsheets
+                elif ext.lower() in ("xlsx", "xls"):
+                    try:
+                        wb = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
+                        parts = []
+                        for sheet in wb.worksheets:
+                            for row in sheet.iter_rows(values_only=True):
+                                row_text = " ".join(str(c) for c in row if c is not None)
+                                if row_text.strip():
+                                    parts.append(row_text)
+                        text = "\n".join(parts)
+                        wb.close()
+                        print(f"✅ Extracted {len(text)} chars from Excel {doc_id}", flush=True)
+                    except Exception as e:
+                        print(f"❌ Excel extraction failed for {doc_id}: {e}", flush=True)
+                
+                # PowerPoint presentations
+                elif ext.lower() in ("pptx", "ppt"):
+                    try:
+                        prs = Presentation(tmp_path)
+                        parts = []
+                        for slide in prs.slides:
+                            for shape in slide.shapes:
+                                if hasattr(shape, "text") and shape.text.strip():
+                                    parts.append(shape.text)
+                        text = "\n".join(parts)
+                        print(f"✅ Extracted {len(text)} chars from PowerPoint {doc_id}", flush=True)
+                    except Exception as e:
+                        print(f"❌ PowerPoint extraction failed for {doc_id}: {e}", flush=True)
+                
+                # Image OCR
+                elif mimetype.startswith("image/"):
+                    try:
+                        img = Image.open(tmp_path)
+                        text = pytesseract.image_to_string(img)
+                        print(f"✅ Extracted {len(text)} chars from Image {doc_id} (OCR)", flush=True)
+                    except Exception as e:
+                        print(f"❌ Image OCR failed for {doc_id}: {e}", flush=True)
+                
+                # Store extracted content
+                db2 = SessionLocal()
+                try:
+                    existing = db2.query(DocumentContent).filter(
+                        DocumentContent.document_id == doc_id
+                    ).first()
+                    
+                    if existing:
+                        existing.content = text
+                        existing.ocr_result = text
+                    else:
+                        cc = DocumentContent(
+                            document_id=doc_id,
+                            content=text,
+                            ocr_result=text
+                        )
+                        db2.add(cc)
+                    
+                    db2.commit()
+                    print(f"✅ Content saved for document {doc_id}", flush=True)
+                    
+                except Exception as e:
+                    print(f"❌ Database error for {doc_id}: {e}", flush=True)
+                    db2.rollback()
+                finally:
+                    db2.close()
+            
+            except Exception as e:
+                print(f"❌ Extraction error for {doc_id}: {e}", flush=True)
+            
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
+        
+        background_tasks.add_task(
+            extract_and_store,
+            doc.id,
+            doc.data,
+            ext,
+            doc.mimetype
+        )
+    
+    return {
+        "success": True,
+        "message": f"Started re-extraction for {len(docs)} documents",
+        "total_documents": len(docs)
+    }
 
 @router.post("/{document_id}/reextract")
 async def reextract_document_content(
@@ -795,7 +1107,7 @@ def archive_document(
             400, f"Cannot archive document with status: {document.status.value}")
 
     document.status = StatusEnum.ARCHIVED
-    document.archived_at = datetime.utcnow()
+    document.archived_at = datetime.datetime.utcnow()
     db.add(document)
     db.commit()
 
@@ -854,7 +1166,7 @@ def move_document_to_trash(
         raise HTTPException(400, "Document is already in trash")
 
     document.status = StatusEnum.TRASHED
-    document.trashed_at = datetime.utcnow()
+    document.trashed_at = datetime.datetime.utcnow()
     db.add(document)
     db.commit()
 
@@ -901,7 +1213,7 @@ def bulk_archive_documents(
         Document.status == StatusEnum.ACTIVE
     ).update({
         Document.status: StatusEnum.ARCHIVED,
-        Document.archived_at: datetime.utcnow()
+        Document.archived_at: datetime.datetime.utcnow()
     }, synchronize_session=False)
 
     db.commit()
@@ -928,7 +1240,7 @@ def bulk_trash_documents(
         Document.status != StatusEnum.TRASHED
     ).update({
         Document.status: StatusEnum.TRASHED,
-        Document.trashed_at: datetime.utcnow()
+        Document.trashed_at: datetime.datetime.utcnow()
     }, synchronize_session=False)
 
     db.commit()
@@ -1135,8 +1447,14 @@ async def get_document_info(
     document_id: int,
     db: Session = Depends(get_db)
 ):
-    """Get document information"""
-    document = db.query(Document).filter(Document.id == document_id).first()
+    """Get document information with all details"""
+    document = db.query(Document).options(
+        joinedload(Document.department),
+        joinedload(Document.organization),
+        joinedload(Document.document_category),
+        joinedload(Document.creator)
+    ).filter(Document.id == document_id).first()
+    
     if not document:
         raise HTTPException(404, "Document not found")
 
@@ -1146,22 +1464,46 @@ async def get_document_info(
         "title": document.title_document,
         "mimetype": document.mimetype,
         "size": document.size,
-        "total_pages": 1,
-        "created_at": document.created_at
+        "total_pages": document.total_pages or 1,
+        "created_at": document.created_at,
+        
+        # NEW FIELDS
+        "file_type": document.file_type,
+        "file_category": document.file_category,
+        "file_owner": document.file_owner,
+        "expire_date": document.expire_date,
+        
+        # Relations
+        "document_category": {
+            "id": document.document_category.id,
+            "name": document.document_category.name,
+            "code": document.document_category.code
+        } if document.document_category else None,
+        
+        "organization": {
+            "id": document.organization.id,
+            "name": document.organization.name,
+            "code": document.organization.code
+        } if document.organization else None,
+        
+        "department": {
+            "id": document.department.id,
+            "name": document.department.name,
+            "code": document.department.code
+        } if document.department else None
     }
 
+    # Get PDF page count if applicable
     if document.mimetype == "application/pdf":
         try:
             import fitz
-            pdf_document = fitz.open(
-                stream=BytesIO(document.data), filetype="pdf")
+            pdf_document = fitz.open(stream=BytesIO(document.data), filetype="pdf")
             info["total_pages"] = len(pdf_document)
             pdf_document.close()
         except:
             pass
 
     return info
-
 
 # ===== SHARE ENDPOINTS (unchanged but with fix) =====
 
@@ -1377,7 +1719,7 @@ def get_shared_document_info(share_token: str):
 
     # Check expiration
     expires_at = datetime.datetime.fromisoformat(share_data["expires_at"])
-    # if datetime.datetime.datetime.utcnow() > expires_at:
+    # if datetime.datetime.datetime.datetime.utcnow() > expires_at:
     #     try:
     #         os.remove(token_file)
     #     except:
@@ -1439,7 +1781,7 @@ def download_shared_document(share_token: str):
 
     # Check expiration
     expires_at = datetime.fromisoformat(share_data["expires_at"])
-    if datetime.datetime.utcnow() > expires_at:
+    if datetime.datetime.datetime.utcnow() > expires_at:
         try:
             os.remove(token_file)
         except:
@@ -1493,7 +1835,7 @@ def get_shared_with_me(
     current_user: User = Depends(get_current_user)
 ):
     shared_docs = db.query(Document).join(DocumentShare).filter(
-        DocumentShare.expires_at > datetime.datetime.utcnow(),
+        DocumentShare.expires_at > datetime.datetime.datetime.utcnow(),
         (
             (DocumentShare.target_user_id == current_user.id) |
             (DocumentShare.target_department_id == current_user.department_id) |
@@ -1547,7 +1889,7 @@ async def update_document_content(
     # Update document data
     document.data = content.encode('latin-1')
     document.size = len(content)
-    document.updated_at = datetime.datetime.utcnow()
+    document.updated_at = datetime.datetime.datetime.utcnow()
 
     db.add(document)
     db.commit()
@@ -1988,3 +2330,29 @@ async def update_document_text_content(
     db.commit()
 
     return {"message": "Document content updated successfully"}
+
+@router.get("/", response_model=List[DocumentCategoryOut])
+def list_document_categories(
+    org_id: Optional[int] = Query(None, description="Filter by organization id (optional)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Return document categories. If caller is not super_admin and org_id not provided,
+    only return categories for current_user.organization_id.
+    """
+    q = db.query(DocumentCategory)
+
+    # if caller supplies org_id AND is super_admin -> allow arbitrary org_id
+    if org_id:
+        if current_user.role != "super_admin":
+            # Non-super-admin may not query other orgs
+            if org_id != current_user.organization_id:
+                raise HTTPException(403, "Cannot query categories for other organizations")
+        q = q.filter(DocumentCategory.organization_id == org_id)
+    else:
+        # if org_id not passed -> for non-super admins limit to user's org
+        if current_user.role != "super_admin":
+            q = q.filter(DocumentCategory.organization_id == current_user.organization_id)
+
+    return q.order_by(DocumentCategory.name).all()
