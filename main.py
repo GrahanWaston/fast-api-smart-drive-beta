@@ -73,7 +73,7 @@ async def log_requests(request: Request, call_next):
         raise
 
 # Include routers
-from routers import directories, documents, document_categories, metadata, auth, organizations, departments, activity, users
+from routers import directories, documents, document_categories, metadata, auth, organizations, departments, activity, users, anayltics
 
 app.include_router(auth.router)
 app.include_router(directories.router)
@@ -84,6 +84,7 @@ app.include_router(departments.router)
 app.include_router(activity.router)
 app.include_router(users.router)
 app.include_router(document_categories.router)
+app.include_router(anayltics.router)
 
 @app.get("/")
 def root():
