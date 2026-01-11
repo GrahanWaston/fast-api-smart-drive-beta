@@ -109,6 +109,8 @@ class Organization(Base):
     status   = Column(String, default="active")
     created_at = Column(DateTime, default=datetime.utcnow)
     
+    license_info = relationship("OrganizationLicense", backref="org", uselist=False, cascade="all, delete")
+    
 class Department(Base):
     __tablename__ = "departments"
     id       = Column(Integer, primary_key=True, index=True)
@@ -165,3 +167,27 @@ class DocumentShare(Base):
     target_organization = relationship("Organization", foreign_keys=[target_organization_id])
     target_department   = relationship("Department", foreign_keys=[target_department_id])
     target_user         = relationship("User", foreign_keys=[target_user_id])
+    
+    
+class SubscriptionStatus(enum.Enum):
+    ACTIVE      = "active"
+    EXPIRED     = "expired"
+    SUSPENDED   = "suspended"
+    TRIAL       = "trial"
+    
+class OrganizationLicense(Base):
+    __tablename__ = "organization_licenses"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, unique=True)
+    subscription_status = Column(Enum(SubscriptionStatus), default=SubscriptionStatus.TRIAL, index=True)
+    start_date = Column(DateTime, default=datetime.utcnow, nullable=False)
+    end_date = Column(DateTime, nullable=False, index=True)
+    trial_days = Column(Integer, default=30)
+    max_users = Column(Integer, default=10)
+    max_storage_gb = Column(Integer, default=5)
+    last_checked = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    organization = relationship("Organization", backref="license", uselist=False)

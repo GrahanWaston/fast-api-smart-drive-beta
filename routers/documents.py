@@ -1523,20 +1523,26 @@ def create_share_link(
     if not document:
         raise HTTPException(404, "Document not found")
 
-    accessible_depts = get_accessible_departments(current_user, db)
-    accessible_orgs = get_accessible_organizations(current_user, db)
+    # SPECIAL RULE: User can share documents they own regardless of org/dept
+    if document.created_by == current_user.id:
+        # Owner can always share their own documents
+        pass  # Allow access
+    else:
+        # Check organization and department access for non-owners
+        accessible_depts = get_accessible_departments(current_user, db)
+        accessible_orgs = get_accessible_organizations(current_user, db)
 
-    has_access = (
-        document.organization_id in accessible_orgs and
-        document.department_id in accessible_depts
-    )
+        has_access = (
+            document.organization_id in accessible_orgs and
+            document.department_id in accessible_depts
+        )
 
-    if not has_access:
-        raise HTTPException(403, "You don't have access to this document")
+        if not has_access:
+            raise HTTPException(403, "You don't have access to this document")
 
     share_token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(days=expires_in)
-    created_at = datetime.now(timezone.utc)
+    expires_at = datetime.datetime.now(timezone.utc) + timedelta(days=expires_in)
+    created_at = datetime.datetime.now(timezone.utc)
 
     share_data = {
         "document_id": document_id,

@@ -2,12 +2,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from .base import Base 
 
-# DATABASE_URL = "postgres://avnadmin:AVNS_noBu8_GLpF_BhYClUzw@pg-32c1c2a5-grahanwaston-f621.c.aivencloud.com:25460/defaultdb?sslmode=require"
-# DATABASE_URL = "postgresql://postgres:123@localhost/db_smart_drive_beta"
+# DATABASE_URL = "postgresql://postgres:123@localhost/db_smart_drive_local"
 
 DATABASE_URL = "postgresql://avnadmin:AVNS_noBu8_GLpF_BhYClUzw@pg-32c1c2a5-grahanwaston-f621.c.aivencloud.com:25460/defaultdb?sslmode=require"
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=20, max_overflow=10)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 def init_db():

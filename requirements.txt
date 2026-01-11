@@ -21,3 +21,4 @@ pandas
 python-pptx>=0.6.0
 pywin32>=300; sys_platform == 'win32'
 # "pydantic[email]"==2.5.0
+google-auth

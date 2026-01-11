@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -6,9 +7,16 @@ from sqlalchemy.orm import Session, joinedload
 from datetime import timedelta
 from connection import schemas
 from connection.database import SessionLocal  
-from models.models import Department, User
+from models.models import Department, OrganizationLicense, User
 from utils import security
 from connection.schemas import *
+from datetime import datetime, timedelta
+from jose import JWTError, jwt
+from google.oauth2 import id_token
+from google.auth.transport import requests
+
+SECRET_KEY = os.getenv("SECRET_KEY", "Test1234")
+ALGORITHM = "HS256"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -137,10 +145,28 @@ def login(form: UserLogin, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == form.email).first()
     
     if not user:
-        raise HTTPException(status_code=401, detail="Email atau password salah")
+        raise HTTPException(status_code=401, detail="Email or Password incorrect")
 
     if not security.verify_password(form.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Email atau password salah")
+        raise HTTPException(status_code=401, detail="Email or Password incorrect")
+    
+    if user.role != "super_admin" and user.organization_id:
+        license = db.query(OrganizationLicense).filter(
+            OrganizationLicense.organization_id == user.organization_id
+        ).first()
+        
+        if not license:
+            raise HTTPException(
+                status_code=403,
+                detail="No valid license found for your organization. Please contact administrator."
+            )
+        
+        if license.end_date < datetime.utcnow():
+            raise HTTPException(
+                status_code=403,
+                detail=f"Your organization license has expired on {license.end_date.strftime('%Y-%m-%d')}. Please contact administrator to renew."
+            )
+    
 
     logger.info(f"Login successful - User: {user.name}, Org: {user.organization_id}, Dept: {user.department_id}")
     
@@ -183,3 +209,87 @@ def require_any_role(allowed_roles: list):
             raise HTTPException(403, f"Requires one of: {', '.join(allowed_roles)}")
         return current_user
     return role_checker
+
+def verify_token(token: str):
+    """Verify JWT token and return payload"""
+    from jose import jwt, JWTError
+    
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+@router.post("/google-login", response_model=Token)
+def google_login(payload: dict, db: Session = Depends(get_db)):
+    token = payload.get("token")
+    if not token:
+        raise HTTPException(status_code=400, detail="Token required")
+    
+    try:
+        # Verify token with audience check
+        client_id = os.getenv("GOOGLE_CLIENT_ID")
+        # Add clock skew tolerance (e.g. 10 seconds) to handle minor time differences
+        idinfo = id_token.verify_oauth2_token(token, requests.Request(), audience=client_id, clock_skew_in_seconds=10)
+        
+        email = idinfo.get('email')
+        if not email:
+             raise HTTPException(status_code=400, detail="Email not found in Google token")
+             
+    except ValueError as e:
+        logger.error(f"Google token verification failed: {e}")
+        raise HTTPException(status_code=401, detail=f"Invalid Google token: {str(e)}")
+        
+    logger.info(f"Google login attempt for: {email}")
+    
+    # Logic similar to login()
+    user = db.query(User).filter(User.email == email).first()
+    
+    if not user:
+        # Auto-register logic
+        try:
+            name = idinfo.get('name', email.split('@')[0])
+            
+            # Create default user
+            user = User(
+                email=email,
+                name=name,
+                hashed_password=security.hash_password("google_login_default"),
+                role="user", # Default role
+                # organization_id & department_id will be None initially
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            logger.info(f"Auto-registered new user from Google: {email}")
+            
+        except Exception as e:
+            logger.error(f"Failed to auto-register user {email}: {e}")
+            raise HTTPException(status_code=500, detail="Failed to create user account")
+
+    # Check license if applicable
+    if user.role != "super_admin" and user.organization_id:
+        license = db.query(OrganizationLicense).filter(
+            OrganizationLicense.organization_id == user.organization_id
+        ).first()
+        
+        if not license:
+            raise HTTPException(
+                status_code=403,
+                detail="No valid license found for your organization. Please contact administrator."
+            )
+        
+        if license.end_date < datetime.utcnow():
+            raise HTTPException(
+                status_code=403,
+                detail=f"Your organization license has expired on {license.end_date.strftime('%Y-%m-%d')}. Please contact administrator to renew."
+            )
+    
+    logger.info(f"Google Login successful - User: {user.name}, Org: {user.organization_id}")
+    
+    access_token = security.create_access_token(
+        data={"sub": str(user.id)},
+        expires_delta=timedelta(hours=24),
+    )
+    
+    return {"access_token": access_token, "token_type": "bearer"}

@@ -1,3 +1,5 @@
+#schemas.py
+
 from enum import Enum
 from pydantic import BaseModel, EmailStr, ConfigDict
 from typing import Optional, List
@@ -279,5 +281,42 @@ class DepartmentUpdate(BaseModel):
     code: Optional[str] = None
     org_id: Optional[int] = None
     parent_id: Optional[int] = None
+    class Config:
+        from_attributes = True
+        
+class OrganizationLicenseBase(BaseModel):
+    subscription_status: Optional[str] = "trial"
+    trial_days: Optional[int] = 30
+    max_users: Optional[int] = 20
+    max_storage_gb: Optional[int] = 5
+
+class OrganizationLicenseOut(OrganizationLicenseBase):
+    id: int
+    organization_id: int
+    start_date: datetime
+    end_date: datetime
+    days_remaining: Optional[int] = None
+    is_active: bool
+    last_checked: datetime
+    
+    class Config:
+        from_attributes = True
+        
+class OrganizationLicenseUpdate(BaseModel):
+    subscription_status: Optional[str] = None
+    end_date: Optional[datetime] = None
+    trial_days: Optional[int] = None
+    max_users: Optional[int] = None
+    max_storage_gb: Optional[int] = None
+
+class OrganizationOut(BaseModel):
+    id: int
+    name: str
+    code: str
+    status: str
+    created_at: datetime
+    departments_count: Optional[int] = 0
+    license_info: Optional[OrganizationLicenseOut] = None
+    
     class Config:
         from_attributes = True

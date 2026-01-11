@@ -1,29 +1,26 @@
 # main.py
 
+from datetime import datetime
 import sys
 import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import uvicorn
+from utils.scheduler import start_scheduler
+from models.models import OrganizationLicense 
+from connection.database import SessionLocal
 
 # Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
-# Setup logging dengan force flush
+# Standard logging setup
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# Force flush after every print
-def print_flush(*args, **kwargs):
-    print(*args, **kwargs)
-    sys.stdout.flush()
 
 app = FastAPI()
 
@@ -38,39 +35,81 @@ app.add_middleware(
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    """Middleware dengan forced logging"""
+    """Optimized middleware logging"""
     import time
-    
     start_time = time.time()
     
-    # Log dengan flush
-    print_flush(f"\n{'='*60}")
-    print_flush(f"📥 {request.method} {request.url.path}")
-    print_flush(f"📥 Query: {dict(request.query_params)}")
+    response = await call_next(request)
     
-    auth = request.headers.get("authorization", "None")
-    if auth != "None":
-        print_flush(f"📥 Auth: {auth[:40]}...")
-    else:
-        print_flush(f"📥 Auth: MISSING")
+    duration = (time.time() - start_time) * 1000
+    
+    # Only log essential info in one line to reduce I/O
+    logger.info(f"{request.method} {request.url.path} - {response.status_code} - {duration:.2f}ms")
+    
+    return response
+
+@app.middleware("http")
+async def license_check_middleware(request: Request, call_next):
+    exempt_paths = [
+        "/auth/login",
+        "/auth/logout", 
+        "/docs",
+        "/openapi.json",
+        "/auth/me"  # ← Tambahin ini
+    ]
+
+    if request.url.path in exempt_paths:
+        return await call_next(request)
+
+    auth_header = request.headers.get("authorization", "")
+    
+    if not auth_header.startswith("Bearer "):
+        return await call_next(request)
+    
+    token = auth_header.replace("Bearer ", "")
+    
+    from routers.auth import verify_token  
+    from jose import JWTError
     
     try:
-        response = await call_next(request)
-        duration = (time.time() - start_time) * 1000
+        payload = verify_token(token)
+        user_id = payload.get("sub")
         
-        print_flush(f"📤 Status: {response.status_code}")
-        print_flush(f"📤 Duration: {duration:.2f}ms")
-        print_flush(f"{'='*60}\n")
+        if not user_id:
+            return await call_next(request)
         
-        return response
-        
+        # Get user dari database
+        db = SessionLocal()
+        try:
+            from models.models import User
+            user = db.query(User).filter(User.id == int(user_id)).first()
+            
+            if not user:
+                return await call_next(request)
+            
+            # ✅ CHECK LICENSE DI SINI
+            if user.role != "super_admin":
+                license = db.query(OrganizationLicense).filter(
+                    OrganizationLicense.organization_id == user.organization_id
+                ).first()
+
+                if not license or license.end_date < datetime.utcnow():
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "detail": "Your organization license has expired. Please contact administrator."
+                        }
+                    )
+        finally:
+            db.close()
+            
+    except JWTError:
+        pass  
     except Exception as e:
-        duration = (time.time() - start_time) * 1000
-        print_flush(f"❌ ERROR: {type(e).__name__}")
-        print_flush(f"❌ Message: {str(e)}")
-        print_flush(f"❌ Duration: {duration:.2f}ms")
-        print_flush(f"{'='*60}\n")
-        raise
+        print(f"License check error: {str(e)}")
+        pass
+
+    return await call_next(request)
 
 # Include routers
 from routers import directories, documents, document_categories, metadata, auth, organizations, departments, activity, users, anayltics
@@ -90,6 +129,18 @@ app.include_router(anayltics.router)
 def root():
     return {"message": "FastAPI running"}
 
+
+# Tambahkan setelah app initialization
+@app.on_event("startup")
+async def startup_event():
+    # Start license checker
+    start_scheduler()
+    print("Application started with license monitoring")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    print("Application shutting down")
+
 if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 8000))
@@ -101,3 +152,4 @@ if __name__ == "__main__":
         log_level="debug",
         access_log=True
     )
+    
